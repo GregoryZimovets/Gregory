@@ -1,0 +1,91 @@
+WITH first_payments AS 
+   (SELECT user_id 
+          ,min(transaction_datetime)::DATE as first_payment_date
+    FROM SKYENG_DB.payments
+    WHERE status_name = 'success'
+    GROUP BY user_id
+    ),
+         
+     all_dates AS 
+    (SELECT DISTINCT DATE_TRUNC('day',class_start_datetime) AS dt
+     FROM SKYENG_DB.classes
+     WHERE class_start_datetime::DATE BETWEEN '2016-01-01' AND '2016-12-31'
+    ),
+    
+    all_dates_by_user AS
+    (SELECT user_id
+            ,dt
+     FROM all_dates all_dates 
+     JOIN first_payments first_payments
+            ON all_dates.dt >= first_payments.first_payment_date
+    ),
+    
+    payments_by_dates AS
+    (SELECT  user_id
+            ,transaction_datetime::DATE AS paymen_date
+            ,SUM(classes) AS transaction_balance_change 
+     FROM SKYENG_DB.payments
+     WHERE status_name = 'success'
+     GROUP BY user_id, paymen_date 
+     ORDER BY user_id, paymen_date
+    ),
+    
+    payments_by_dates_cumsum AS
+    (SELECT  all_dates_by_user.user_id
+            ,all_dates_by_user.dt 
+            ,COALESCE (transaction_balance_change, 0) AS transaction_balance_change
+            ,SUM(COALESCE (transaction_balance_change, 0)) OVER (PARTITION BY all_dates_by_user.user_id ORDER BY paymen_date) AS cumulative_balance
+    FROM all_dates_by_user all_dates_by_user
+    LEFT JOIN payments_by_dates payments_by_dates
+        ON all_dates_by_user.user_id = payments_by_dates.user_id
+        AND all_dates_by_user.dt = payments_by_dates.paymen_date
+    ORDER BY dt
+    ),
+    
+    classes_by_dates AS
+    (SELECT  user_id
+            ,DATE_TRUNC('day', class_start_datetime) as class_date
+            ,COUNT(class_start_datetime)* -1 AS classes
+     FROM SKYENG_DB.classes
+     WHERE class_status in ('success', 'failed_by_student')
+        AND class_type != 'trial'
+     GROUP BY user_id, DATE_TRUNC('day', class_start_datetime)
+    ),
+    
+    classes_by_dates_dates_cumsum AS 
+    (SELECT all_dates_by_user.user_id
+            ,dt
+            ,classes
+            ,SUM(classes) OVER (PARTITION BY all_dates_by_user.user_id  ORDER BY dt) AS classes_cm
+     FROM all_dates_by_user all_dates_by_user
+     LEFT JOIN classes_by_dates classes_by_dates
+     ON all_dates_by_user.user_id = classes_by_dates.user_id
+     AND all_dates_by_user.dt = classes_by_dates.class_date
+     ORDER BY dt
+     
+    ),
+    balances AS 
+    (SELECT  
+    payments_by_dates_cumsum.user_id
+            ,payments_by_dates_cumsum.dt
+            ,COALESCE (transaction_balance_change, 0) AS transaction_balance_change
+            ,cumulative_balance
+            ,classes
+            ,COALESCE (classes_cm, 0) AS classes_cm
+            ,classes_cm + cumulative_balance AS balances
+     FROM payments_by_dates_cumsum payments_by_dates_cumsum
+     JOIN classes_by_dates_dates_cumsum classes_by_dates_dates_cumsum
+     ON payments_by_dates_cumsum.user_id = classes_by_dates_dates_cumsum.user_id
+     AND payments_by_dates_cumsum.dt = classes_by_dates_dates_cumsum.dt
+    )
+
+
+SELECT dt  
+        ,sum(transaction_balance_change) transaction_balance_change
+        ,sum(cumulative_balance) cumulative_balance
+        ,sum(classes) classes
+        ,sum(classes_cm) classes_cm
+        ,sum(balances) balances
+FROM balances 
+GROUP BY dt 
+ORDER BY dt
